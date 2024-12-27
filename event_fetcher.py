@@ -1,170 +1,223 @@
+
+
+
 import requests
-import json
-import time
-import csv
-import sys
 import argparse
-from datetime import datetime, timedelta
+from supabase import create_client
+from config import settings
 
-URL = 'https://ra.co/graphql'
+
+
+
+supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
+
+URL = "https://ra.co/graphql"
 HEADERS = {
-    'Content-Type': 'application/json',
-    'Referer': 'https://ra.co/events/uk/london',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0'
+    "Content-Type": "application/json",
+    "Referer": "https://ra.co/",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 }
-QUERY_TEMPLATE_PATH = "graphql_query_template.json"
-DELAY = 1  # Adjust this value as needed
 
+# Initialize your Supabase client globally
+# supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-class EventFetcher:
-    """
-    A class to fetch and print event details from RA.co
-    """
+class VenueFetcher:
+    def __init__(self, venue_id):
+        self.venue_id = venue_id
 
-    def __init__(self, areas, listing_date_gte, listing_date_lte):
-        self.payload = self.generate_payload(areas, listing_date_gte, listing_date_lte)
+    def get_venue_details(self):
+        payload = {
+            "operationName": "GET_VENUE_MOREON",
+            "variables": {
+                "excludeEventId": "0",
+                "id": self.venue_id,
+            },
+            "query": """
+            query GET_VENUE_MOREON($id: ID!, $excludeEventId: ID = 0) {
+                venue(id: $id) {
+                    id
+                    name
+                    logoUrl
+                    photo
+                    blurb
+                    address
+                    contentUrl
+                    followerCount
+                    capacity
+                    topArtists {
+                        name
+                        contentUrl
+                    }
+                    eventCountThisYear
+                    events(limit: 50, type: LATEST, excludeIds: [$excludeEventId]) {
+                        id
+                        title
+                        interestedCount
+                        date
+                        startTime
+                        endTime
+                        contentUrl
+                        flyerFront
+                        images {
+                            id
+                            filename
+                            alt
+                            type
+                            crop
+                        }
+                        artists {
+                            id
+                            name
+                            contentUrl
+                        }
+                        venue {
+                            id
+                            name
+                            address
+                            contentUrl
+                            capacity
+                        }
+                        pick {
+                            id
+                            blurb
+                        }
+                        isTicketed
+                        attending
+                        queueItEnabled
+                        newEventForm
+                    }
+                }
+            }
+            """,
+        }
 
-    @staticmethod
-    def generate_payload(areas, listing_date_gte, listing_date_lte):
-        """
-        Generate the payload for the GraphQL request.
-
-        :param areas: The area code to filter events.
-        :param listing_date_gte: The start date for event listings (inclusive).
-        :param listing_date_lte: The end date for event listings (inclusive).
-        :return: The generated payload.
-        """
-        with open(QUERY_TEMPLATE_PATH, "r") as file:
-            payload = json.load(file)
-
-        payload["variables"]["filters"]["areas"]["eq"] = areas
-        payload["variables"]["filters"]["listingDate"]["gte"] = listing_date_gte
-        payload["variables"]["filters"]["listingDate"]["lte"] = listing_date_lte
-
-        return payload
-
-    def get_events(self, page_number):
-        """
-        Fetch events for the given page number.
-
-        :param page_number: The page number for event listings.
-        :return: A list of events.
-        """
-        self.payload["variables"]["page"] = page_number
-        response = requests.post(URL, headers=HEADERS, json=self.payload)
-
+        response = requests.post(URL, headers=HEADERS, json=payload)
         try:
             response.raise_for_status()
             data = response.json()
-        except (requests.exceptions.RequestException, ValueError):
-            print(f"Error: {response.status_code}")
-            return []
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            raise
+        except ValueError:
+            print("Failed to decode JSON response")
+            raise
 
-        if 'data' not in data:
-            print(f"Error: {data}")
-            return []
+        if "data" not in data or "venue" not in data["data"]:
+            raise ValueError("Failed to fetch venue details")
 
-        return data["data"]["eventListings"]["data"]
+        return data["data"]["venue"]
 
-    @staticmethod
-    def print_event_details(events):
-        """
-        Print the details of the events.
 
-        :param events: A list of events.
-        """
-        for event in events:
-            event_data = event["event"]
-            print(f"Event name: {event_data['title']}")
-            print(f"Date: {event_data['date']}")
-            print(f"Start Time: {event_data['startTime']}")
-            print(f"End Time: {event_data['endTime']}")
-            print(f"Artists: {[artist['name'] for artist in event_data['artists']]}")
-            print(f"Venue: {event_data['venue']['name']}")
-            print(f"Event URL: {event_data['contentUrl']}")
-            print(f"Number of guests attending: {event_data['attending']}")
-            print("-" * 80)
+def create_venue_user_in_supabase(venue):
+    user_payload = {
+        "username": venue["name"],
+        "email": f"venue_{venue['id']}@dummy.com",
+        "password_hash": "hashed_dummy_password",
+        "display_name": venue["name"],
+        "isvenue": True,
+        "description": venue.get("blurb", ""),
+        "website_url": f"https://ra.co{venue.get('contentUrl','')}",  # For example
+        "profile_picture_url": venue.get("logoUrl", ""),
+    }
+    try:
+        response = supabase.table("users").insert(user_payload).execute()
+        if response.data:
+            return response.data[0]["id"]
+        else:
+            raise Exception("Failed to retrieve the newly created user ID.")
+    except Exception as e:
+        print(f"Error creating venue user in Supabase: {e}")
+        raise e
 
-    def fetch_and_print_all_events(self):
-        """
-        Fetch and print all events.
-        """
-        page_number = 1
 
-        while True:
-            events = self.get_events(page_number)
+def parse_ra_event_to_ticket(event, venue):
+    # Combine date + startTime into one datetime if you wish, but keep it simple here.
+    event_datetime = event.get("date", None)
 
-            if not events:
-                break
+    parsed_data = {
+        "event_date": event_datetime,
+        "title": event.get("title", "Untitled Event"),
+        "cover_image": event.get("images", None)[0]['filename'],
+        "short_description": venue.get("address", ""),
+        "long_description": "",
+        "creators": [],
+        "lineup": [artist["name"] for artist in event.get("artists", [])],
+        "has_comments": True,
+        "ticket_type": "physical",
+        "type_properties": {
+            "host": venue.get("name", "Unknown Host"),
+            "location": venue.get("address", "Unknown Location"),
+        },
+        "vorm": None,
+        "tagg": None,
+        "additional_fields": None,
+        "preview_url": None,
+        "co_creator_name": None,
+        "host": venue.get("name", None),
+    }
 
-            self.print_event_details(events)
-            page_number += 1
-            time.sleep(DELAY)
+    return parsed_data
 
-    def fetch_all_events(self):
-        """
-        Fetch all events and return them as a list.
 
-        :return: A list of all events.
-        """
-        all_events = []
-        page_number = 1
+def upload_event_ticket_to_supabase(parsed_data, user_id):
+    ticket_payload = {
+        "event_date": parsed_data.get("event_date"),
+        "title": parsed_data.get("title"),
+        "cover_image": parsed_data.get("cover_image"),
+        "short_description": parsed_data.get("short_description"),
+        "long_description": parsed_data.get("long_description"),
+        "creators": parsed_data.get("creators"),
+        "lineup": parsed_data.get("lineup"),
+        "has_comments": parsed_data.get("has_comments", None),
+        "ticket_type": parsed_data.get("ticket_type", "physical"),
+        "type_properties": {
+            "host": parsed_data["type_properties"].get("host", "Unknown Host"),
+            "location": parsed_data["type_properties"].get("location", "Unknown Location"),
+        },
+        "vorm": parsed_data.get("vorm", None),
+        "tagg": parsed_data.get("tagg", None),
+        "additional_fields": parsed_data.get("additional_fields", None),
+        "preview_url": parsed_data.get("preview_url", None),
+        "main_creator_id": user_id,  # The newly created venue user
+        "co_creator_name": parsed_data.get("co_creator_name", None),
+        "main_creator_name": parsed_data.get("host", None),
+    }
 
-        while True:
-            events = self.get_events(page_number)
+    try:
+        response = supabase.table("tickets").insert(ticket_payload).execute()
+        if response.data:
+            return {"ticket_id": response.data[0]["id"]}
+        else:
+            raise Exception("Failed to retrieve the newly created ticket ID.")
+    except Exception as e:
+        print(f"Error uploading to Supabase: {e}")
+        raise e
 
-            if not events:
-                break
 
-            all_events.extend(events)
-            page_number += 1
-            time.sleep(DELAY)
+def fetch_and_upload_venue_events(venue_id):
+    venue_fetcher = VenueFetcher(venue_id)
+    venue_details = venue_fetcher.get_venue_details()
 
-        return all_events
+    # Create or retrieve a user for this venue
+    venue_user_id = create_venue_user_in_supabase(venue_details)
 
-    def save_events_to_csv(self, events, output_file="events.csv"):
-        """
-        Save events to a CSV file.
+    # For each event in this venue, parse it & upload
+    events = venue_details.get("events", [])
+    for event in events:
+        parsed_data = parse_ra_event_to_ticket(event, venue_details)
+        upload_event_ticket_to_supabase(parsed_data, venue_user_id)
 
-        :param events: A list of events.
-        :param output_file: The output file path. (default: "events.csv")
-        """
-        with open(output_file, "w", newline="", encoding="utf-8") as file:
-            writer = csv.writer(file)
-            writer.writerow(["Event name", "Date", "Start Time", "End Time", "Artists",
-                             "Venue", "Event URL", "Number of guests attending"])
-
-            for event in events:
-                event_data = event["event"]
-                writer.writerow([event_data['title'], event_data['date'], event_data['startTime'],
-                                 event_data['endTime'], ', '.join([artist['name'] for artist in event_data['artists']]),
-                                 event_data['venue']['name'], event_data['contentUrl'], event_data['attending']])
+    print(f"Successfully uploaded {len(events)} events for venue {venue_id}.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch events from ra.co and save them to a CSV file.")
-    parser.add_argument("areas", type=int, help="The area code to filter events.")
-    parser.add_argument("start_date", type=str, help="The start date for event listings (inclusive, format: YYYY-MM-DD).")
-    parser.add_argument("end_date", type=str, help="The end date for event listings (inclusive, format: YYYY-MM-DD).")
-    parser.add_argument("-o", "--output", type=str, default="events.csv", help="The output file path (default: events.csv).")
+    parser = argparse.ArgumentParser(
+        description="Fetch venue details from RA.co, create a venue user, and create events as tickets in Supabase."
+    )
+    parser.add_argument("venue_id", type=str, help="The ID of the RA.co venue (e.g., 137474).")
     args = parser.parse_args()
 
-    listing_date_gte = f"{args.start_date}T00:00:00.000Z"
-    listing_date_lte = f"{args.end_date}T23:59:59.999Z"
-
-    event_fetcher = EventFetcher(args.areas, listing_date_gte, listing_date_lte)
-
-    all_events = []
-    current_start_date = datetime.strptime(args.start_date, "%Y-%m-%d")
-
-    while current_start_date <= datetime.strptime(args.end_date, "%Y-%m-%d"):
-        listing_date_gte = current_start_date.strftime("%Y-%m-%dT00:00:00.000Z")
-        event_fetcher.payload = event_fetcher.generate_payload(args.areas, listing_date_gte, listing_date_lte)
-        events = event_fetcher.fetch_all_events()
-        all_events.extend(events)
-        current_start_date += timedelta(days=len(events))
-
-    event_fetcher.save_events_to_csv(all_events, args.output)
+    fetch_and_upload_venue_events(args.venue_id)
 
 
 if __name__ == "__main__":
